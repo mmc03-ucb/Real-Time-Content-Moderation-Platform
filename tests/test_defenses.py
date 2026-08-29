@@ -30,18 +30,23 @@ def test_limits_are_per_user(fake_redis):
 # ----------------------------------------------------------------- dedup
 
 def test_the_same_message_twice_is_a_duplicate(fake_redis):
-    assert not dedup.is_duplicate(fake_redis, "u1", "buy my stuff")
-    assert dedup.is_duplicate(fake_redis, "u1", "buy my stuff")
+    assert not dedup.is_duplicate(fake_redis, "u1", "buy my stuff now")
+    assert dedup.is_duplicate(fake_redis, "u1", "buy my stuff now")
 
 
 def test_duplicate_check_ignores_case_and_spacing(fake_redis):
-    dedup.is_duplicate(fake_redis, "u1", "Buy My Stuff")
-    assert dedup.is_duplicate(fake_redis, "u1", "  buy my stuff ")
+    dedup.is_duplicate(fake_redis, "u1", "Buy My Stuff Now")
+    assert dedup.is_duplicate(fake_redis, "u1", "  buy my stuff now ")
 
 
 def test_two_users_saying_the_same_thing_are_not_duplicates(fake_redis):
+    dedup.is_duplicate(fake_redis, "u1", "buy my stuff now")
+    assert not dedup.is_duplicate(fake_redis, "u2", "buy my stuff now")
+
+
+def test_short_reactions_are_allowed_to_repeat(fake_redis):
     dedup.is_duplicate(fake_redis, "u1", "gg")
-    assert not dedup.is_duplicate(fake_redis, "u2", "gg")
+    assert not dedup.is_duplicate(fake_redis, "u1", "gg")
 
 
 # ------------------------------------------------------------ risk score

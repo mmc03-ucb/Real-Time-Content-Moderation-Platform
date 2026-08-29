@@ -87,8 +87,8 @@ def test_an_unsure_model_score_goes_to_a_human(build):
 
 def test_repeating_yourself_is_caught(build):
     pipeline, _ = build()
-    pipeline.evaluate_batch([chat("buy my stuff")])
-    [decision] = pipeline.evaluate_batch([chat("buy my stuff")])
+    pipeline.evaluate_batch([chat("buy my stuff right now")])
+    [decision] = pipeline.evaluate_batch([chat("buy my stuff right now")])
     assert decision.reason_code == d.DUPLICATE
 
 

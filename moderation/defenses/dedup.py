@@ -7,6 +7,10 @@ hash the user and the text, and refuse the second copy within the TTL.
 
 import hashlib
 
+# Short reactions like "gg" or "lol" repeat naturally and are not spam,
+# so only longer messages are checked for duplicates.
+MIN_LENGTH = 15
+
 
 def _key(user_id: str, text: str) -> str:
     digest = hashlib.sha1(f"{user_id}|{text.strip().lower()}".encode("utf-8")).hexdigest()
@@ -20,5 +24,7 @@ def is_duplicate(redis_client, user_id: str, text: str, ttl_seconds: int = 30) -
     SET NX is a single atomic call, so two workers racing on the same message
     cannot both decide theirs is the original.
     """
+    if len(text.strip()) < MIN_LENGTH:
+        return False
     first_time = redis_client.set(_key(user_id, text), "1", nx=True, ex=ttl_seconds)
     return not first_time
