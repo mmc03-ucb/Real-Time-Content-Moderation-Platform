@@ -62,10 +62,16 @@ worker that crashes on it would restart, read it again, and crash again.
 ## MySQL or Redis is briefly unavailable
 
 MySQL connections are retried on start up so containers can boot in any order.
-If MySQL goes away mid-run the worker crashes and restarts, and Kafka replays
-whatever was uncommitted. Redis is the hot path for rate limits, dedup and risk
-scores; losing it means those defences are unavailable while the rules and the
-model keep working.
+If a write fails mid-run the worker logs it, does not commit the offsets, and
+takes the batch again a moment later. A blip costs a retry rather than a worker.
+
+Two workers writing the same users' reputations at once used to deadlock in
+MySQL. Rows are now written in a fixed order so every worker takes its locks the
+same way, and the one statement that can still lose a race retries itself.
+
+Redis is the hot path for rate limits, duplicate detection and risk scores.
+Losing it means those defences are unavailable while the rules and the model
+keep working.
 
 ## A rule change goes wrong
 
