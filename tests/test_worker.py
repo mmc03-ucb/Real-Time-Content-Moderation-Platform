@@ -3,7 +3,6 @@ import pytest
 from moderation.config import settings
 from moderation.ingest.generator import make_message
 from moderation.ml.classifier import SafeClassifier
-from moderation.pipeline import decisions as d
 from moderation.pipeline import sink as sink_module
 from moderation.pipeline.pipeline import ModerationPipeline
 from moderation.pipeline.sink import DecisionSink
@@ -109,3 +108,29 @@ def test_an_empty_poll_does_nothing(parts):
     worker, dao, publish, consumer = parts([])
     assert worker.run_once() == 0
     assert publish.sent == []
+
+
+def test_the_worker_keeps_going_after_a_failed_batch(parts, monkeypatch):
+    worker, dao, _, consumer = parts([[encode(chat())], [encode(chat("second one"))]])
+
+    calls = {"n": 0}
+    original = worker.run_once
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("mysql went away")
+        worker.stop()
+        return original()
+
+    monkeypatch.setattr(worker, "run_once", flaky)
+    monkeypatch.setattr("moderation.pipeline.worker.time.sleep", lambda s: None)
+    worker.run()
+    assert calls["n"] == 2  # the first failure did not kill the worker
+
+
+def test_stopping_ends_the_loop(parts):
+    worker, _, _, _ = parts([])
+    worker.stop()
+    worker.run()
+    assert worker.running is False

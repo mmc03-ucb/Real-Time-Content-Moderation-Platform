@@ -8,7 +8,6 @@ whoever wants to see how the platform and its A/B policies are doing.
 """
 
 from pathlib import Path
-from typing import Optional
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse

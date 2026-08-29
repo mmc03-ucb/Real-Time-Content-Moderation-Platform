@@ -9,7 +9,6 @@ means those messages are handled again rather than lost.
     python -m moderation.pipeline.worker
 """
 
-import json
 import logging
 import signal
 import time

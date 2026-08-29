@@ -25,3 +25,18 @@ def test_a_clean_run_accounts_for_everything():
     assert result["missing"] == 0
     assert result["produced_per_second"] == 10.0
     assert result["decided_per_second"] == 5.0
+
+
+def test_only_this_run_s_decisions_are_counted():
+    from moderation.loadtest.bench import collect_decisions
+    from tests.fakes import FakeConsumer, encode
+
+    mine = encode({"stream_id": "bench123_0", "action": "allow", "latency_ms": 4.0})
+    theirs = encode({"stream_id": "stream_0", "action": "delete", "latency_ms": 900.0})
+    consumer = FakeConsumer([[mine, theirs]])
+
+    latencies, actions, _, timed_out = collect_decisions(consumer, "bench123",
+                                                         expected=1, timeout=1)
+    assert latencies == [4.0]
+    assert actions == {"allow": 1}
+    assert timed_out is False
