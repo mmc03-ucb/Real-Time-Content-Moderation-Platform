@@ -1,8 +1,11 @@
-from moderation.ingest.consumer import build_consumer, parse, TOPIC
+"""Dev helper: print every message on the chat topic as it arrives."""
+
+from moderation.config import settings
+from moderation.ingest.consumer import build_consumer, parse
 
 if __name__ == "__main__":
-    consumer = build_consumer()
-    consumer.subscribe([TOPIC])
+    consumer = build_consumer(group="tail-chat")
+    consumer.subscribe([settings.chat_topic])
     print("Listening for messages. Ctrl-C to stop.")
     try:
         while True:
@@ -13,7 +16,7 @@ if __name__ == "__main__":
                 print(f"Error: {msg.error()}")
                 continue
             data = parse(msg.value())
-            print(f"Consumed message from {data['user_id']}: {data['text']}")
+            print(f"[{data['stream_id']}] {data['user_id']}: {data['text']}")
     except KeyboardInterrupt:
         pass
     finally:
