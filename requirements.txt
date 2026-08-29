@@ -17,3 +17,4 @@ opentelemetry-sdk
 pytest
 pytest-cov
 httpx
+fakeredis
