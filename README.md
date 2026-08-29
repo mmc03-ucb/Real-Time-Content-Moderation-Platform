@@ -80,6 +80,16 @@ further for users with a recent history of violations.
 
 ---
 
+## Watching it run
+
+![The StreamGuard dashboard during a raid](docs/images/grafana.png)
+
+Throughput, end to end latency, why messages were actioned, Kafka lag, and how
+much work is waiting on a human. The dashboard is loaded into Grafana on start
+up, so this is what you see about thirty seconds after `make up`.
+
+---
+
 ## Measured on a laptop
 
 Two workers, one Kafka broker, everything in Docker on one machine.
