@@ -2,8 +2,9 @@
 The funnel every message goes through.
 
 Order matters. The cheap checks run first and settle most of the traffic for
-almost nothing; only what is left costs a call to the toxicity model. The model
-is then asked about the whole leftover batch in one go.
+almost nothing; only what is left costs a call to the toxicity model. Both
+halves work on a whole batch at a time: one Redis round trip for the checks,
+one model call for the scoring.
 
     duplicate? -> rate limited? -> raid? -> rules -> model -> verdict
 """
@@ -11,7 +12,7 @@ is then asked about the whole leftover batch in one go.
 import time
 from typing import List, Optional, Tuple
 
-from moderation.defenses import dedup, raid, rate_limit, risk
+from moderation.defenses import signals as signal_batch
 from moderation.obs import metrics
 from moderation.obs.tracing import tracer
 from moderation.pipeline.decisions import (ALLOW, CLEAN, DELETE, DUPLICATE,
@@ -38,17 +39,21 @@ class ModerationPipeline:
         self.raid_threshold = raid_threshold
 
     def evaluate_batch(self, messages: List[dict]) -> List[Decision]:
-        """Decide a whole batch. The model is called at most once per batch."""
+        """Decide a whole batch. Two Redis trips and at most one model call."""
+        if not messages:
+            return []
+
         engine = self.rule_store.current()
         metrics.RULES_VERSION.set(engine.version)
         metrics.BATCH_SIZE.observe(len(messages))
 
         with tracer().start_as_current_span("moderate_batch") as span:
             span.set_attribute("batch.size", len(messages))
-            decided, needs_model = self._run_cheap_checks(engine, messages)
+            batch = self._ask_redis(engine, messages)
+            decided, needs_model = self._run_cheap_checks(engine, messages, batch)
             span.set_attribute("batch.sent_to_model", len(needs_model))
-            decided.extend(self._run_model(needs_model))
-            self._finish(decided, messages)
+            decided.extend(self._run_model(needs_model, batch))
+            self._finish(decided, messages, batch)
 
         for decision in decided:
             metrics.DECISIONS.labels(decision.action, decision.reason_code,
@@ -57,59 +62,71 @@ class ModerationPipeline:
         metrics.MODEL_HEALTHY.set(1 if getattr(self.classifier, "healthy", True) else 0)
         return decided
 
-    def _run_cheap_checks(self, engine, messages):
+    # ------------------------------------------------------------------
+
+    def _ask_redis(self, engine, messages):
+        """One request that answers dedup, speed, raids and reputation."""
+        limit, _ = self._rate_settings(engine, messages[0]["stream_id"])
+        with tracer().start_as_current_span("redis_signals"):
+            with metrics.STAGE_SECONDS.labels("redis").time():
+                return signal_batch.gather(self.redis, messages, limit,
+                                           RATE_WINDOW_SECONDS, self.raid_threshold)
+
+    def _run_cheap_checks(self, engine, messages, batch):
         """Settle everything a rule or a Redis counter can answer on its own."""
         decided: List[Decision] = []
         needs_model: List[Tuple[dict, ab.Strategy]] = []
         with tracer().start_as_current_span("cheap_checks"):
-            with metrics.STAGE_SECONDS.labels("cheap_checks").time():
+            with metrics.STAGE_SECONDS.labels("rules").time():
                 for message in messages:
                     strategy = ab.pick(message["stream_id"], self.strategies)
-                    early = self._cheap_checks(engine, message, strategy)
+                    early = self._cheap_checks(engine, message, strategy,
+                                               batch[message["msg_id"]])
                     if early is not None:
                         decided.append(early)
                     else:
                         needs_model.append((message, strategy))
         return decided, needs_model
 
-    def _run_model(self, needs_model) -> List[Decision]:
+    def _run_model(self, needs_model, batch) -> List[Decision]:
         """One model call for whatever the cheap checks could not settle."""
         with tracer().start_as_current_span("classify"):
             with metrics.STAGE_SECONDS.labels("model").time():
                 scores = self.classifier.score_batch([m["text"] for m, _ in needs_model])
-        return [self._from_score(message, strategy, score)
+        return [self._from_score(message, strategy, score, batch[message["msg_id"]])
                 for (message, strategy), score in zip(needs_model, scores)]
 
-    def _finish(self, decided, messages) -> None:
-        """Stamp each verdict with its latency and charge violations to the user."""
+    def _finish(self, decided, messages, batch) -> None:
+        """Stamp each verdict with its latency, then write back what changed."""
         now = time.time()
-        for decision, message in _pair_by_id(decided, messages):
+        by_id = {m["msg_id"]: m for m in messages}
+        violations = []
+        for decision in decided:
+            message = by_id.get(decision.msg_id)
+            if message is None:
+                continue
             # End to end: from the moment the viewer sent it to the verdict.
             decision.latency_ms = max(0.0, (now - message["ts"]) * 1000)
             metrics.END_TO_END_MS.observe(decision.latency_ms)
             if decision.is_violation:
-                risk.add_violation(self.redis, decision.user_id, 1.0, now=now)
+                violations.append((decision.user_id,
+                                   batch[decision.msg_id].risk_score, 1.0))
+        signal_batch.commit(self.redis, batch.new_raids, violations, now=now)
 
-    # ------------------------------------------------------------------
-
-    def _cheap_checks(self, engine, message: dict,
-                      strategy: ab.Strategy) -> Optional[Decision]:
+    def _cheap_checks(self, engine, message: dict, strategy: ab.Strategy,
+                      signals) -> Optional[Decision]:
         """Everything that can be answered without the model. None means carry on."""
-        user_id, stream_id = message["user_id"], message["stream_id"]
-
-        if dedup.is_duplicate(self.redis, user_id, message["text"]):
+        if signals.duplicate:
             return self._decision(message, strategy, DELETE, DUPLICATE)
 
-        limit, over_limit_action = self._rate_settings(engine, stream_id)
-        if not rate_limit.allow(self.redis, f"user:{user_id}", limit,
-                                RATE_WINDOW_SECONDS):
+        if signals.over_rate_limit:
+            _, over_limit_action = self._rate_settings(engine, message["stream_id"])
             return self._decision(message, strategy, over_limit_action, RATE_LIMIT)
 
-        # Watch for a flood of new accounts. While a raid is on, new accounts
-        # are hidden rather than escalated: sending thousands of raid messages
-        # to the review queue would bury the moderators.
-        raid.observe(self.redis, message, threshold=self.raid_threshold)
-        if raid.is_new_account(message) and raid.in_raid_mode(self.redis, stream_id):
+        # While a raid is on, new accounts are hidden rather than escalated:
+        # sending thousands of raid messages to the review queue would bury
+        # the moderators.
+        if signals.new_account and signals.raid_mode:
             return self._decision(message, strategy, SHADOW, RAID_MODE)
 
         hits = engine.evaluate(message)
@@ -121,16 +138,14 @@ class ModerationPipeline:
         return None
 
     def _from_score(self, message: dict, strategy: ab.Strategy,
-                    score: Optional[float]) -> Decision:
+                    score: Optional[float], signals) -> Decision:
         """Apply the three way threshold to a model score."""
         if score is None:
             # The model is down. Nothing tripped a rule, so let it through and
             # let the alert on ml_unavailable get someone's attention.
             return self._decision(message, strategy, ALLOW, ML_UNAVAILABLE)
 
-        user_risk = risk.get_score(self.redis, message["user_id"])
-        cuts = ab.thresholds_for(strategy, user_risk)
-
+        cuts = ab.thresholds_for(strategy, signals.risk_score)
         if score >= cuts["delete"]:
             return self._decision(message, strategy, DELETE, ML_TOXIC, ml_score=score)
         if score >= cuts["escalate"]:
@@ -156,12 +171,3 @@ class ModerationPipeline:
             strategy=strategy.name,
             **extra,
         )
-
-
-def _pair_by_id(decisions: List[Decision], messages: List[dict]):
-    """Match each verdict back to the message it came from."""
-    by_id = {m["msg_id"]: m for m in messages}
-    for decision in decisions:
-        message = by_id.get(decision.msg_id)
-        if message is not None:
-            yield decision, message

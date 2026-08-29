@@ -54,19 +54,22 @@ class FakeDao:
         self.reviews = []
         self.risk_bumps = []
 
-    def record_decision(self, conn, decision):
-        if decision.msg_id in self.decisions:
-            return False
-        self.decisions[decision.msg_id] = decision
-        return True
+    def existing_msg_ids(self, conn, msg_ids):
+        return {i for i in msg_ids if i in self.decisions}
 
-    def enqueue_review(self, conn, decision, text, rule_hits):
-        self.reviews.append({"msg_id": decision.msg_id, "text": text,
-                             "rule_hits": rule_hits})
-        return True
+    def record_decisions(self, conn, decisions):
+        for decision in decisions:
+            self.decisions[decision.msg_id] = decision
+        return len(decisions)
 
-    def bump_user_risk(self, conn, user_id, amount):
-        self.risk_bumps.append((user_id, amount))
+    def enqueue_reviews(self, conn, items):
+        self.reviews.extend({"msg_id": d.msg_id, "text": text,
+                             "rule_hits": d.rule_hits} for d, text in items)
+        return len(items)
+
+    def bump_user_risks(self, conn, users):
+        self.risk_bumps.extend(users)
+        return len(users)
 
 
 def encode(message: dict) -> FakeKafkaMessage:

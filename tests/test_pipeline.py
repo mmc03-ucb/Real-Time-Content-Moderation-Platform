@@ -124,7 +124,7 @@ def test_the_model_sees_the_batch_once(build):
 
 
 def test_repeat_offenders_are_judged_more_strictly(build, fake_redis):
-    from moderation.defenses import risk
+    from moderation.defenses import signals
     strict = [ab.Strategy("A", delete_threshold=0.9, escalate_threshold=0.6,
                           risk_bonus=0.3)]
     pipeline, _ = build(score=0.65, strategies=strict)
@@ -133,7 +133,7 @@ def test_repeat_offenders_are_judged_more_strictly(build, fake_redis):
     assert first.action == d.ESCALATE
 
     # After a pile of violations the same score now clears the delete line.
-    risk.add_violation(fake_redis, "repeat", 10.0)
+    signals.commit(fake_redis, set(), [("repeat", 0.0, 10.0)])
     [second] = pipeline.evaluate_batch([chat("borderline again", user="repeat")])
     assert second.action == d.DELETE
 

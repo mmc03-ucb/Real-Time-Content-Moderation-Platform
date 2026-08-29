@@ -1,11 +1,11 @@
 """
-Where a verdict goes once it has been made.
+Where verdicts go once they have been made.
 
 Three places: MySQL for the audit trail, the decisions topic so anything
-downstream can react, and the review queue when a human needs to look.
+downstream can react, and the review queue when a human needs to look. Written
+a batch at a time, because one round trip for sixty rows beats sixty.
 """
 
-import json
 import logging
 
 from moderation.config import settings
@@ -17,35 +17,46 @@ log = logging.getLogger(__name__)
 
 
 class DecisionSink:
-    """Writes one verdict everywhere it needs to go."""
+    """Writes a batch of verdicts everywhere they need to go."""
 
     def __init__(self, conn, producer, publish):
         self.conn = conn
         self.producer = producer
         self._publish = publish
         self.written = 0
-        self.duplicates = 0
+        self.replays = 0
         self.escalated = 0
 
-    def handle(self, decision, message: dict) -> None:
-        # INSERT IGNORE on msg_id: if Kafka replays a message after a crash we
-        # record it once, so the counts stay right.
-        is_new = dao.record_decision(self.conn, decision)
-        if not is_new:
-            self.duplicates += 1
-            metrics.REPLAYS.inc()
+    def handle_batch(self, decisions, messages_by_id: dict) -> None:
+        if not decisions:
             return
-        self.written += 1
 
-        self._publish(self.producer, decision.as_event(), settings.decisions_topic)
+        # Anything already on record is a Kafka replay after a crash. It has
+        # been handled once, so we leave it alone.
+        already_decided = dao.existing_msg_ids(self.conn,
+                                               [d.msg_id for d in decisions])
+        fresh = [d for d in decisions if d.msg_id not in already_decided]
+        if len(fresh) != len(decisions):
+            self.replays += len(decisions) - len(fresh)
+            metrics.REPLAYS.inc(len(decisions) - len(fresh))
+        if not fresh:
+            return
 
-        if decision.action == ESCALATE:
-            dao.enqueue_review(self.conn, decision, message["text"], decision.rule_hits)
-            self._publish(self.producer, decision.as_event(), settings.review_topic)
-            self.escalated += 1
+        dao.record_decisions(self.conn, fresh)
+        self.written += len(fresh)
+        for decision in fresh:
+            self._publish(self.producer, decision.as_event(), settings.decisions_topic)
 
-        if decision.is_violation:
-            dao.bump_user_risk(self.conn, decision.user_id, 1.0)
+        escalations = [d for d in fresh if d.action == ESCALATE]
+        if escalations:
+            dao.enqueue_reviews(self.conn, [(d, messages_by_id[d.msg_id]["text"])
+                                            for d in escalations])
+            for decision in escalations:
+                self._publish(self.producer, decision.as_event(), settings.review_topic)
+            self.escalated += len(escalations)
+
+        violations = [(d.user_id, 1.0) for d in fresh if d.is_violation]
+        dao.bump_user_risks(self.conn, violations)
 
     def dead_letter(self, raw: bytes, error: str) -> None:
         """Park a message we could not even read, so the worker never stalls on it."""

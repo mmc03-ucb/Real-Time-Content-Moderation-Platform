@@ -77,8 +77,8 @@ class Worker:
                 messages.append(message)
 
         if messages:
-            for decision in self.pipeline.evaluate_batch(messages):
-                self.sink.handle(decision, self._by_id(messages)[decision.msg_id])
+            decisions = self.pipeline.evaluate_batch(messages)
+            self.sink.handle_batch(decisions, self._by_id(messages))
             self.handled += len(messages)
 
         # Only now do we tell Kafka we are done with these offsets. A worker

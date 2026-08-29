@@ -52,22 +52,39 @@ def set_rule_enabled(conn, rule_id: int, enabled: bool) -> int:
 
 # ------------------------------------------------------------ decisions
 
-def record_decision(conn, decision) -> bool:
+def existing_msg_ids(conn, msg_ids: List[str]) -> set:
     """
-    Save a verdict. Returns False if we had already saved this message.
+    Which of these messages have we already decided?
 
-    Kafka can hand us the same message twice after a crash, so the unique
-    msg_id plus INSERT IGNORE is what keeps the numbers honest.
+    Kafka can hand us the same message twice after a crash, so this is what
+    keeps the counts honest. One query for the whole batch.
     """
-    changed = _execute(conn, """
-        INSERT IGNORE INTO decisions
-            (msg_id, stream_id, user_id, action, reason_code, rule_id,
-             ml_score, strategy, latency_ms)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (decision.msg_id, decision.stream_id, decision.user_id, decision.action,
-          decision.reason_code, decision.rule_id, decision.ml_score,
-          decision.strategy, decision.latency_ms))
-    return changed > 0
+    if not msg_ids:
+        return set()
+    placeholders = ", ".join(["%s"] * len(msg_ids))
+    rows = _rows(conn, f"SELECT msg_id FROM decisions WHERE msg_id IN ({placeholders})",
+                 tuple(msg_ids))
+    return {r["msg_id"] for r in rows}
+
+
+def record_decisions(conn, decisions) -> int:
+    """
+    Save a batch of verdicts in one statement.
+
+    INSERT IGNORE on top of the unique msg_id is the safety net: if two workers
+    somehow handle the same message, only one row survives.
+    """
+    if not decisions:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany("""
+            INSERT IGNORE INTO decisions
+                (msg_id, stream_id, user_id, action, reason_code, rule_id,
+                 ml_score, strategy, latency_ms)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, [(d.msg_id, d.stream_id, d.user_id, d.action, d.reason_code, d.rule_id,
+               d.ml_score, d.strategy, d.latency_ms) for d in decisions])
+        return cur.rowcount
 
 
 def decision_counts(conn, since_minutes: int = 60) -> List[dict]:
@@ -81,15 +98,18 @@ def decision_counts(conn, since_minutes: int = 60) -> List[dict]:
 
 # --------------------------------------------------------- review queue
 
-def enqueue_review(conn, decision, text: str, rule_hits: List[dict]) -> bool:
-    """Put a borderline message in front of a human."""
-    changed = _execute(conn, """
-        INSERT IGNORE INTO review_items
-            (msg_id, stream_id, user_id, text, ml_score, rule_hits_json, strategy)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """, (decision.msg_id, decision.stream_id, decision.user_id, text,
-          decision.ml_score, json.dumps(rule_hits), decision.strategy))
-    return changed > 0
+def enqueue_reviews(conn, items: List[tuple]) -> int:
+    """Put borderline messages in front of a human. Each item is (decision, text)."""
+    if not items:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany("""
+            INSERT IGNORE INTO review_items
+                (msg_id, stream_id, user_id, text, ml_score, rule_hits_json, strategy)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, [(d.msg_id, d.stream_id, d.user_id, text, d.ml_score,
+               json.dumps(d.rule_hits), d.strategy) for d, text in items])
+        return cur.rowcount
 
 
 def claim_next_item(conn, reviewer: str) -> Optional[dict]:
@@ -155,16 +175,20 @@ def review_stats(conn) -> List[dict]:
 
 # -------------------------------------------------------------- user risk
 
-def bump_user_risk(conn, user_id: str, amount: float) -> None:
-    """Nudge a user's reputation after a violation."""
-    _execute(conn, """
-        INSERT INTO users_risk (user_id, risk_score, violations, last_violation_at)
-        VALUES (%s, %s, 1, NOW())
-        ON DUPLICATE KEY UPDATE
-            risk_score = risk_score + VALUES(risk_score),
-            violations = violations + 1,
-            last_violation_at = NOW()
-    """, (user_id, amount))
+def bump_user_risks(conn, users: List[tuple]) -> int:
+    """Durable copy of user reputation. Each entry is (user_id, amount)."""
+    if not users:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany("""
+            INSERT INTO users_risk (user_id, risk_score, violations, last_violation_at)
+            VALUES (%s, %s, 1, NOW())
+            ON DUPLICATE KEY UPDATE
+                risk_score = risk_score + VALUES(risk_score),
+                violations = violations + 1,
+                last_violation_at = NOW()
+        """, users)
+        return cur.rowcount
 
 
 # ------------------------------------------------------------- strategies
