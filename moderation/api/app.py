@@ -22,17 +22,27 @@ STATIC = Path(__file__).parent / "static"
 
 app = FastAPI(title="StreamGuard", description="Live stream content moderation")
 
-# Opened once and reused. Overridden with fakes in the tests.
+# Overridden with fakes in the tests.
 _state = {}
 
 
 def get_conn():
-    if "conn" not in _state:
-        _state["conn"] = mysql.connect()
-    return _state["conn"]
+    """
+    A fresh MySQL connection per request, closed on the way out.
+
+    One connection cannot serve two requests at once, and the dashboard's
+    queries are small and infrequent, so the simplest correct thing is also
+    fast enough. The workers, which are the hot path, keep one open instead.
+    """
+    conn = mysql.connect(retries=2, delay=0.5)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def get_redis():
+    """One Redis client for the whole app. The driver pools connections itself."""
     if "redis" not in _state:
         _state["redis"] = build_redis()
     return _state["redis"]
