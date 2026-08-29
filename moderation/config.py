@@ -40,8 +40,8 @@ class Settings:
 
     # How many messages a worker grabs per poll, and how long it waits for them.
     # Bigger batches mean fewer, larger calls to the toxicity model.
-    batch_size: int = _int("BATCH_SIZE", 64)
-    batch_wait_seconds: float = _float("BATCH_WAIT_SECONDS", 0.2)
+    batch_size: int = _int("BATCH_SIZE", 500)
+    batch_wait_seconds: float = _float("BATCH_WAIT_SECONDS", 0.1)
 
     # How often workers check Redis to see if the rules changed.
     rules_poll_seconds: float = _float("RULES_POLL_SECONDS", 3.0)

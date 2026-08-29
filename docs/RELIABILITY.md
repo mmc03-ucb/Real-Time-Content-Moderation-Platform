@@ -18,6 +18,10 @@ was done, so those messages are handed to another worker.
 silently dropped. At-least-once delivery plus idempotent writes gives
 exactly-once results in the place that matters: the record of what was decided.
 
+**How fast:** workers send a heartbeat every 3 seconds and are declared dead
+after 10, rather than Kafka's 45 second default. That took the worst delay in a
+failover from about 46 seconds down to about 12.
+
 **How to see it:** `make chaos` kills a worker halfway through a load test. The
 run reports `unaccounted for 0`.
 

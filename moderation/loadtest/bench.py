@@ -38,8 +38,8 @@ def collect_decisions(consumer, prefix: str, expected: int,
     """
     Read verdicts until we have one per message sent, or we give up waiting.
 
-    Also returns how long the verdicts took to arrive, which is the rate the
-    pipeline drains a backlog at, and whether we ran out of patience.
+    Also returns how long the verdicts took to arrive after producing stopped,
+    and whether we ran out of patience waiting for the last few.
     """
     latencies, actions = [], {}
     started = time.perf_counter()
@@ -88,8 +88,8 @@ def print_report(result: dict) -> None:
     else:
         print(f"  unaccounted for     {result['missing']}")
     print(f"  produced            {result['produced_per_second']}/s")
-    print(f"  moderated           {result['decided_per_second']}/s "
-          f"(rate the workers cleared the backlog at)")
+    print(f"  verdicts read back  {result['decided_per_second']}/s "
+          f"(how fast the backlog cleared once producing stopped)")
     print(f"  latency p50/p95/p99 {result['p50_ms']} / {result['p95_ms']} / "
           f"{result['p99_ms']} ms")
     print(f"  slowest message     {result['max_ms']} ms")

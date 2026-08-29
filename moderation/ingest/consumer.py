@@ -14,6 +14,10 @@ def build_consumer(servers: str = None, group: str = None) -> Consumer:
         "auto.offset.reset": "earliest",
         # We commit offsets ourselves, only after a batch is fully handled.
         "enable.auto.commit": False,
+        # Notice a dead worker in ten seconds rather than the default
+        # forty-five, so its partitions get picked up again quickly.
+        "session.timeout.ms": 10000,
+        "heartbeat.interval.ms": 3000,
     })
 
 

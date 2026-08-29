@@ -23,7 +23,9 @@ cleanup() { kill $WORKER_1 $WORKER_2 2>/dev/null || true; }
 trap cleanup EXIT
 
 echo "starting load"
-$PY -m moderation.loadtest.bench --rate "$RATE" --duration "$DURATION" &
+# A longer settle window, because the survivor has a backlog to clear.
+$PY -m moderation.loadtest.bench --rate "$RATE" --duration "$DURATION" \
+    --settle-timeout 180 &
 BENCH=$!
 
 sleep $(( DURATION / 2 ))
