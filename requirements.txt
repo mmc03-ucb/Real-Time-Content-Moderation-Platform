@@ -1,3 +1,19 @@
+# Core pipeline
+confluent-kafka
+redis
+PyMySQL
+
+# Review dashboard
+fastapi
+uvicorn[standard]
+jinja2
+
+# Observability
+prometheus-client
+opentelemetry-api
+opentelemetry-sdk
+
+# Tests
 pytest
 pytest-cov
-confluent-kafka
+httpx
