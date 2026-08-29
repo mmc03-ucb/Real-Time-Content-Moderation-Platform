@@ -25,8 +25,10 @@ class ChatSimulator:
                  toxic_ratio: float = 0.05,
                  spam_ratio: float = 0.05,
                  link_ratio: float = 0.05,
-                 seed: Optional[int] = None):
-        self.stream_ids = [f"stream_{i}" for i in range(streams)]
+                 seed: Optional[int] = None,
+                 prefix: str = "stream"):
+        self.prefix = prefix
+        self.stream_ids = [f"{prefix}_{i}" for i in range(streams)]
         self.users_per_stream = users_per_stream
         self.toxic_ratio = toxic_ratio
         self.spam_ratio = spam_ratio

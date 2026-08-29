@@ -12,8 +12,10 @@ from typing import Optional
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from moderation.defenses.client import build_redis
+from moderation.obs import metrics
 from moderation.rules.store import bump_version, read_version
 from moderation.storage import dao, mysql
 
@@ -45,6 +47,13 @@ def dashboard():
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics(conn=Depends(get_conn)):
+    """Queue depth belongs to the API, since it is the one that owns the queue."""
+    metrics.REVIEW_QUEUE_DEPTH.set(dao.queue_depth(conn))
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # ------------------------------------------------------------ review queue

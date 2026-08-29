@@ -12,6 +12,8 @@ import time
 from typing import List, Optional, Tuple
 
 from moderation.defenses import dedup, raid, rate_limit, risk
+from moderation.obs import metrics
+from moderation.obs.tracing import tracer
 from moderation.pipeline.decisions import (ALLOW, CLEAN, DELETE, DUPLICATE,
                                            ESCALATE, ML_TOXIC, ML_UNAVAILABLE,
                                            ML_UNCERTAIN, RAID_MODE, RATE_LIMIT,
@@ -38,29 +40,55 @@ class ModerationPipeline:
     def evaluate_batch(self, messages: List[dict]) -> List[Decision]:
         """Decide a whole batch. The model is called at most once per batch."""
         engine = self.rule_store.current()
+        metrics.RULES_VERSION.set(engine.version)
+        metrics.BATCH_SIZE.observe(len(messages))
+
+        with tracer().start_as_current_span("moderate_batch") as span:
+            span.set_attribute("batch.size", len(messages))
+            decided, needs_model = self._run_cheap_checks(engine, messages)
+            span.set_attribute("batch.sent_to_model", len(needs_model))
+            decided.extend(self._run_model(needs_model))
+            self._finish(decided, messages)
+
+        for decision in decided:
+            metrics.DECISIONS.labels(decision.action, decision.reason_code,
+                                     decision.strategy).inc()
+        metrics.MESSAGES.inc(len(messages))
+        metrics.MODEL_HEALTHY.set(1 if getattr(self.classifier, "healthy", True) else 0)
+        return decided
+
+    def _run_cheap_checks(self, engine, messages):
+        """Settle everything a rule or a Redis counter can answer on its own."""
         decided: List[Decision] = []
         needs_model: List[Tuple[dict, ab.Strategy]] = []
+        with tracer().start_as_current_span("cheap_checks"):
+            with metrics.STAGE_SECONDS.labels("cheap_checks").time():
+                for message in messages:
+                    strategy = ab.pick(message["stream_id"], self.strategies)
+                    early = self._cheap_checks(engine, message, strategy)
+                    if early is not None:
+                        decided.append(early)
+                    else:
+                        needs_model.append((message, strategy))
+        return decided, needs_model
 
-        for message in messages:
-            strategy = ab.pick(message["stream_id"], self.strategies)
-            early = self._cheap_checks(engine, message, strategy)
-            if early is not None:
-                decided.append(early)
-            else:
-                needs_model.append((message, strategy))
+    def _run_model(self, needs_model) -> List[Decision]:
+        """One model call for whatever the cheap checks could not settle."""
+        with tracer().start_as_current_span("classify"):
+            with metrics.STAGE_SECONDS.labels("model").time():
+                scores = self.classifier.score_batch([m["text"] for m, _ in needs_model])
+        return [self._from_score(message, strategy, score)
+                for (message, strategy), score in zip(needs_model, scores)]
 
-        scores = self.classifier.score_batch([m["text"] for m, _ in needs_model])
-        for (message, strategy), score in zip(needs_model, scores):
-            decided.append(self._from_score(message, strategy, score))
-
+    def _finish(self, decided, messages) -> None:
+        """Stamp each verdict with its latency and charge violations to the user."""
         now = time.time()
         for decision, message in _pair_by_id(decided, messages):
             # End to end: from the moment the viewer sent it to the verdict.
             decision.latency_ms = max(0.0, (now - message["ts"]) * 1000)
+            metrics.END_TO_END_MS.observe(decision.latency_ms)
             if decision.is_violation:
                 risk.add_violation(self.redis, decision.user_id, 1.0, now=now)
-
-        return decided
 
     # ------------------------------------------------------------------
 

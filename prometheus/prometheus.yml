@@ -1,0 +1,18 @@
+# Scrapes the workers and the dashboard API. Workers run on your machine, so
+# Prometheus reaches back out of its container to find them.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: moderation-workers
+    static_configs:
+      # Four slots: each worker takes the next free port when it starts.
+      - targets:
+          - host.docker.internal:9100
+          - host.docker.internal:9101
+          - host.docker.internal:9102
+          - host.docker.internal:9103
+
+  - job_name: review-api
+    static_configs:
+      - targets: ["host.docker.internal:8000"]

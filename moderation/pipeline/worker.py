@@ -19,6 +19,7 @@ from moderation.defenses.client import build_redis
 from moderation.ingest.consumer import build_consumer, parse
 from moderation.ingest.producer import build_producer, flush, publish
 from moderation.ml.classifier import load_classifier
+from moderation.obs import metrics, tracing
 from moderation.pipeline.pipeline import ModerationPipeline
 from moderation.pipeline.sink import DecisionSink
 from moderation.rules.store import RuleStore, read_version
@@ -43,6 +44,7 @@ class Worker:
         self.batch_wait = batch_wait if batch_wait is not None else settings.batch_wait_seconds
         self.running = True
         self.handled = 0
+        self._lag_checked_at = 0.0
 
     def stop(self, *_):
         log.info("shutting down after this batch")
@@ -79,9 +81,22 @@ class Worker:
                 self.sink.handle(decision, self._by_id(messages)[decision.msg_id])
             self.handled += len(messages)
 
-        # Only now do we tell Kafka we are done with these offsets.
+        # Only now do we tell Kafka we are done with these offsets. A worker
+        # that dies before this point simply sees the batch again.
         self.consumer.commit(asynchronous=False)
+        self._report_lag()
         return len(messages)
+
+    def _report_lag(self) -> None:
+        """Publish how far behind we are, at most once a second."""
+        now = time.monotonic()
+        if now - self._lag_checked_at < 1.0:
+            return
+        self._lag_checked_at = now
+        try:
+            metrics.CONSUMER_LAG.set(metrics.consumer_lag(self.consumer))
+        except Exception:
+            pass
 
     def _read(self, raw):
         """Parse a message, or send it to the dead letter topic if it is broken."""
@@ -124,6 +139,10 @@ def build_worker():
 
 
 def main() -> None:
+    tracing.setup()
+    port = metrics.serve(settings.metrics_port)
+    log.info("metrics on http://localhost:%d/metrics", port)
+
     worker, producer = build_worker()
     signal.signal(signal.SIGINT, worker.stop)
     signal.signal(signal.SIGTERM, worker.stop)

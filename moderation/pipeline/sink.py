@@ -9,6 +9,7 @@ import json
 import logging
 
 from moderation.config import settings
+from moderation.obs import metrics
 from moderation.pipeline.decisions import ESCALATE
 from moderation.storage import dao
 
@@ -32,6 +33,7 @@ class DecisionSink:
         is_new = dao.record_decision(self.conn, decision)
         if not is_new:
             self.duplicates += 1
+            metrics.REPLAYS.inc()
             return
         self.written += 1
 
@@ -48,6 +50,7 @@ class DecisionSink:
     def dead_letter(self, raw: bytes, error: str) -> None:
         """Park a message we could not even read, so the worker never stalls on it."""
         log.warning("could not handle a message: %s", error)
+        metrics.DEAD_LETTERS.inc()
         self._publish(self.producer,
                       {"error": error, "raw": raw.decode("utf-8", "replace")},
                       settings.dead_letter_topic)
