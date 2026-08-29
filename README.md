@@ -66,7 +66,7 @@ anything expensive runs.
 | 1 | Duplicate check | Copy-paste spam: same user, same text, seconds apart | one Redis call |
 | 2 | Rate limit | Someone flooding the chat | one Redis call |
 | 3 | Raid check | A crowd of new accounts hitting one stream at once | one Redis call |
-| 4 | Rules | Slurs, scam phrases, link policy, new-account limits | in-memory, no I/O |
+| 4 | Rules | Slurs, scam phrases, link policy, new-account limits | in memory, no I/O |
 | 5 | Toxicity model | Everything a pattern cannot describe | one call per batch |
 
 Whatever survives all five is scored 0 to 1 and lands in one of three buckets:
@@ -112,9 +112,12 @@ produces, so the numbers come out of the pipeline itself.
 traffic. Only what is genuinely ambiguous is worth a model call, and that is
 where the whole throughput story comes from.
 
-**One model call per batch.** Workers pull up to 64 messages at a time (or
-whatever has arrived in 200ms) and score them together. Scoring 64 messages in
-one call is far cheaper than 64 calls.
+**One call per batch, everywhere.** Workers pull up to 500 messages at a time
+(or whatever has arrived in 100ms) and then talk to each dependency once for the
+whole batch: one Redis round trip for the rate limits, duplicates, raid counters
+and reputation lookups; one call to the model; one insert into MySQL. Doing that
+per message instead was the difference between roughly 700 and 4,000 messages a
+second per worker.
 
 **Partition by stream_id.** One stream's messages always land on the same
 partition, so they stay in order relative to each other. Different streams are
