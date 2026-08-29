@@ -31,6 +31,19 @@ class DecisionSink:
         if not decisions:
             return
 
+        with metrics.STAGE_SECONDS.labels("mysql").time():
+            fresh = self._save(decisions, messages_by_id)
+
+        with metrics.STAGE_SECONDS.labels("kafka").time():
+            for decision in fresh:
+                self._publish(self.producer, decision.as_event(),
+                              settings.decisions_topic)
+                if decision.action == ESCALATE:
+                    self._publish(self.producer, decision.as_event(),
+                                  settings.review_topic)
+
+    def _save(self, decisions, messages_by_id: dict):
+        """Write the batch to MySQL and return the verdicts that were new."""
         # Anything already on record is a Kafka replay after a crash. It has
         # been handled once, so we leave it alone.
         already_decided = dao.existing_msg_ids(self.conn,
@@ -40,23 +53,20 @@ class DecisionSink:
             self.replays += len(decisions) - len(fresh)
             metrics.REPLAYS.inc(len(decisions) - len(fresh))
         if not fresh:
-            return
+            return []
 
         dao.record_decisions(self.conn, fresh)
         self.written += len(fresh)
-        for decision in fresh:
-            self._publish(self.producer, decision.as_event(), settings.decisions_topic)
 
         escalations = [d for d in fresh if d.action == ESCALATE]
         if escalations:
             dao.enqueue_reviews(self.conn, [(d, messages_by_id[d.msg_id]["text"])
                                             for d in escalations])
-            for decision in escalations:
-                self._publish(self.producer, decision.as_event(), settings.review_topic)
             self.escalated += len(escalations)
 
-        violations = [(d.user_id, 1.0) for d in fresh if d.is_violation]
-        dao.bump_user_risks(self.conn, violations)
+        dao.bump_user_risks(self.conn, [(d.user_id, 1.0) for d in fresh
+                                        if d.is_violation])
+        return fresh
 
     def dead_letter(self, raw: bytes, error: str) -> None:
         """Park a message we could not even read, so the worker never stalls on it."""

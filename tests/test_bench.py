@@ -16,6 +16,7 @@ def test_the_report_flags_messages_that_never_came_back():
                     actions={"allow": 90}, settle_seconds=1.0)
     assert result["missing"] == 10
     assert result["decided"] == 90
+    assert result["timed_out"] is False
 
 
 def test_a_clean_run_accounts_for_everything():

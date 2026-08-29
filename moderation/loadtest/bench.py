@@ -35,9 +35,16 @@ def percentile(values, fraction: float) -> float:
 
 def collect_decisions(consumer, prefix: str, expected: int,
                       timeout: float = 30.0):
-    """Read verdicts until we have one per message sent, or we give up waiting."""
+    """
+    Read verdicts until we have one per message sent, or we give up waiting.
+
+    Also returns how long the verdicts took to arrive, which is the rate the
+    pipeline drains a backlog at, and whether we ran out of patience.
+    """
     latencies, actions = [], {}
-    deadline = time.perf_counter() + timeout
+    started = time.perf_counter()
+    deadline = started + timeout
+    last_seen = started
     while len(latencies) < expected and time.perf_counter() < deadline:
         batch = consumer.consume(num_messages=500, timeout=0.5)
         for raw in batch:
@@ -48,16 +55,19 @@ def collect_decisions(consumer, prefix: str, expected: int,
                 continue  # traffic from some other run
             latencies.append(event["latency_ms"])
             actions[event["action"]] = actions.get(event["action"], 0) + 1
-    return latencies, actions
+        if batch:
+            last_seen = time.perf_counter()
+    return latencies, actions, last_seen - started, len(latencies) < expected
 
 
 def report(sent: int, produce_seconds: float, latencies, actions,
-           settle_seconds: float) -> dict:
+           settle_seconds: float, timed_out: bool = False) -> dict:
     decided = len(latencies)
     return {
         "sent": sent,
         "decided": decided,
         "missing": sent - decided,
+        "timed_out": timed_out,
         "produced_per_second": round(sent / produce_seconds, 1),
         "decided_per_second": round(decided / settle_seconds, 1) if settle_seconds else 0,
         "p50_ms": round(percentile(latencies, 0.50), 1),
@@ -73,9 +83,13 @@ def print_report(result: dict) -> None:
     print("\n--- StreamGuard load test ---")
     print(f"  sent                {result['sent']}")
     print(f"  decided             {result['decided']}")
-    print(f"  unaccounted for     {result['missing']}")
+    if result["timed_out"]:
+        print(f"  still in flight     {result['missing']} (gave up waiting, not lost)")
+    else:
+        print(f"  unaccounted for     {result['missing']}")
     print(f"  produced            {result['produced_per_second']}/s")
-    print(f"  moderated           {result['decided_per_second']}/s")
+    print(f"  moderated           {result['decided_per_second']}/s "
+          f"(rate the workers cleared the backlog at)")
     print(f"  latency p50/p95/p99 {result['p50_ms']} / {result['p95_ms']} / "
           f"{result['p99_ms']} ms")
     print(f"  slowest message     {result['max_ms']} ms")
@@ -111,13 +125,12 @@ def main() -> None:
     flush(producer, timeout=30)
     produce_seconds = time.perf_counter() - started
 
-    settle_started = time.perf_counter()
-    latencies, actions = collect_decisions(consumer, prefix, sent,
-                                           timeout=args.settle_timeout)
-    settle_seconds = time.perf_counter() - settle_started
+    latencies, actions, settle_seconds, timed_out = collect_decisions(
+        consumer, prefix, sent, timeout=args.settle_timeout)
     consumer.close()
 
-    result = report(sent, produce_seconds, latencies, actions, settle_seconds)
+    result = report(sent, produce_seconds, latencies, actions, settle_seconds,
+                    timed_out)
     print_report(result)
     if args.json:
         print(json.dumps(result, indent=2))

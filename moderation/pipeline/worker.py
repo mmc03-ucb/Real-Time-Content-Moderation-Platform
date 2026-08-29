@@ -52,7 +52,14 @@ class Worker:
 
     def run(self) -> None:
         while self.running:
-            self.run_once()
+            try:
+                self.run_once()
+            except Exception:
+                # Offsets were not committed, so Kafka will hand this batch back.
+                # Better to retry a batch than to lose a worker to a blip.
+                metrics.BATCH_FAILURES.inc()
+                log.exception("batch failed, it will be handled again")
+                time.sleep(0.5)
 
     def run_once(self) -> int:
         """
@@ -83,7 +90,8 @@ class Worker:
 
         # Only now do we tell Kafka we are done with these offsets. A worker
         # that dies before this point simply sees the batch again.
-        self.consumer.commit(asynchronous=False)
+        with metrics.STAGE_SECONDS.labels("commit").time():
+            self.consumer.commit(asynchronous=False)
         self._report_lag()
         return len(messages)
 

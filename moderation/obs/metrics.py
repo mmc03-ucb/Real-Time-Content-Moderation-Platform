@@ -19,6 +19,10 @@ REPLAYS = Counter(
     "streamguard_replayed_messages_total",
     "Messages Kafka delivered again that we had already decided")
 
+BATCH_FAILURES = Counter(
+    "streamguard_batch_failures_total",
+    "Batches that hit an error and will be handled again")
+
 DEAD_LETTERS = Counter(
     "streamguard_dead_letters_total", "Messages we could not read at all")
 
