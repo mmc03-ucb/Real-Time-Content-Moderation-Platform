@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamGuard — moderator queue</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --line: #262b35;
+    --text: #e6e9ef; --muted: #9aa3b2;
+    --ok: #35c07f; --bad: #ff5f6d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; }
+  header { display: flex; gap: 24px; align-items: baseline; flex-wrap: wrap;
+           padding: 18px 24px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
+  .stat { color: var(--muted); font-size: 13px; }
+  .stat b { color: var(--text); font-size: 15px; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px; }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+           border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  .message { font-size: 20px; margin: 10px 0 18px; word-break: break-word; }
+  .meta { color: var(--muted); font-size: 13px; display: flex; gap: 18px; flex-wrap: wrap; }
+  .pill { border: 1px solid var(--line); border-radius: 20px; padding: 2px 10px; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 10px 18px;
+           cursor: pointer; color: #0f1115; font-weight: 600; }
+  .allow { background: var(--ok); }
+  .remove { background: var(--bad); }
+  .skip { background: #3a4150; color: var(--text); }
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  kbd { background: #0f1115; border: 1px solid var(--line); border-radius: 4px;
+        padding: 1px 5px; font-size: 11px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .5px; }
+  h2 { font-size: 14px; color: var(--muted); text-transform: uppercase;
+       letter-spacing: .5px; margin: 0 0 14px; }
+  .empty { color: var(--muted); padding: 20px 0; }
+  .toggle { background: none; border: 1px solid var(--line); color: var(--muted);
+            padding: 3px 10px; font-size: 12px; font-weight: 400; }
+</style>
+</head>
+<body>
+<header>
+  <h1>StreamGuard</h1>
+  <span class="stat">in queue <b id="depth">–</b></span>
+  <span class="stat">reviewed this session <b id="done">0</b></span>
+  <span class="stat">rules version <b id="rules-version">–</b></span>
+  <span class="stat">moderator <b id="who">anonymous</b></span>
+</header>
+
+<main>
+  <section class="panel" id="review">
+    <h2>Needs a human</h2>
+    <div id="card" class="empty">Loading…</div>
+  </section>
+
+  <section class="panel">
+    <h2>Strategy comparison</h2>
+    <table id="strategy-table"><tbody></tbody></table>
+  </section>
+
+  <section class="panel">
+    <h2>Rules <span class="stat">— switching one off reaches every worker in seconds</span></h2>
+    <table id="rules-table"><tbody></tbody></table>
+  </section>
+</main>
+
+<script>
+const reviewer = localStorage.getItem("reviewer") || "anonymous";
+document.getElementById("who").textContent = reviewer;
+let current = null, doneCount = 0;
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  if (res.status === 204) return null;
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// Ask for the next message waiting on a human.
+async function nextItem() {
+  current = await api(`/api/review/claim?reviewer=${encodeURIComponent(reviewer)}`,
+                      { method: "POST" });
+  render();
+}
+
+function render() {
+  const card = document.getElementById("card");
+  if (!current) {
+    card.className = "empty";
+    card.textContent = "All caught up. Nothing waiting for review.";
+    return;
+  }
+  card.className = "";
+  const hits = (current.rule_hits_json ? JSON.parse(current.rule_hits_json) : [])
+                 .map(h => h.rule_name).join(", ") || "none";
+  card.innerHTML = `
+    <div class="message">${escapeHtml(current.text)}</div>
+    <div class="meta">
+      <span class="pill">${escapeHtml(current.user_id)}</span>
+      <span class="pill">${escapeHtml(current.stream_id)}</span>
+      <span class="pill">score ${current.ml_score === null ? "–" : Number(current.ml_score).toFixed(2)}</span>
+      <span class="pill">strategy ${escapeHtml(current.strategy)}</span>
+      <span class="pill">rules: ${escapeHtml(hits)}</span>
+    </div>
+    <div class="actions">
+      <button class="allow"  onclick="decide('allow')">Allow <kbd>A</kbd></button>
+      <button class="remove" onclick="decide('delete')">Remove <kbd>D</kbd></button>
+      <button class="skip"   onclick="nextItem()">Skip <kbd>S</kbd></button>
+    </div>`;
+}
+
+async function decide(decision) {
+  if (!current) return;
+  await api(`/api/review/${current.id}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision, reviewer })
+  });
+  doneCount++;
+  document.getElementById("done").textContent = doneCount;
+  await nextItem();
+  loadStats();
+}
+
+// One key per action, so a moderator never has to reach for the mouse.
+document.addEventListener("keydown", e => {
+  if (e.key === "a" || e.key === "A") decide("allow");
+  if (e.key === "d" || e.key === "D") decide("delete");
+  if (e.key === "s" || e.key === "S") nextItem();
+});
+
+async function loadStats() {
+  const stats = await api("/api/stats");
+  document.getElementById("depth").textContent = stats.queue_depth;
+  document.getElementById("rules-version").textContent = stats.rules_version;
+
+  const byStrategy = {};
+  for (const row of stats.decisions) {
+    byStrategy[row.strategy] ??= { deleted: 0, escalated: 0, allowed: 0, total: 0 };
+    const bucket = byStrategy[row.strategy];
+    bucket.total += row.total;
+    if (row.action === "delete") bucket.deleted += row.total;
+    if (row.action === "escalate") bucket.escalated += row.total;
+    if (row.action === "allow") bucket.allowed += row.total;
+  }
+  for (const row of stats.review) {
+    byStrategy[row.strategy] ??= { deleted: 0, escalated: 0, allowed: 0, total: 0 };
+    // A human saying "allow" means the model was wrong to flag it.
+    byStrategy[row.strategy].overturned = row.overturned || 0;
+    byStrategy[row.strategy].reviewed = (row.upheld || 0) + (row.overturned || 0);
+  }
+
+  const rows = Object.entries(byStrategy).map(([name, s]) => `
+    <tr><td>${name}</td>
+        <td>${s.total}</td>
+        <td>${pct(s.deleted, s.total)}</td>
+        <td>${pct(s.escalated, s.total)}</td>
+        <td>${pct(s.overturned, s.reviewed)}</td></tr>`).join("");
+  document.querySelector("#strategy-table tbody").innerHTML = `
+    <tr><th>Strategy</th><th>Decisions</th><th>Removed</th>
+        <th>Sent to review</th><th>Overturned by a human</th></tr>${rows}`;
+}
+
+async function loadRules() {
+  const rules = await api("/api/rules");
+  const rows = rules.map(r => `
+    <tr><td>${escapeHtml(r.name)}</td>
+        <td>${escapeHtml(r.rule_type)}</td>
+        <td>${escapeHtml(r.action)}</td>
+        <td>${r.stream_id ? escapeHtml(r.stream_id) : "all streams"}</td>
+        <td>v${r.version}</td>
+        <td><button class="toggle" onclick="toggleRule(${r.id}, ${!r.enabled})">
+            ${r.enabled ? "on" : "off"}</button></td></tr>`).join("");
+  document.querySelector("#rules-table tbody").innerHTML = `
+    <tr><th>Rule</th><th>Type</th><th>Action</th><th>Scope</th>
+        <th>Version</th><th>Enabled</th></tr>${rows}`;
+}
+
+async function toggleRule(id, enabled) {
+  await api(`/api/rules/${id}/toggle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled })
+  });
+  loadRules(); loadStats();
+}
+
+function pct(part, whole) {
+  if (!whole) return "–";
+  return ((part || 0) / whole * 100).toFixed(1) + "%";
+}
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+nextItem(); loadStats(); loadRules();
+setInterval(loadStats, 5000);
+</script>
+</body>
+</html>
